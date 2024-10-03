@@ -1,5 +1,11 @@
 import matplotlib.pyplot as plt
 import numpy as np
+from sklearn.neural_network import MLPRegressor
+from pyswarm import pso
+import skfuzzy as fuzz
+from skfuzzy import control as ctrl
+from geneticalgorithm import geneticalgorithm as ga
+import networkx as nx  # Ensure networkx is installed
 
 class PIDController:
     def __init__(self, Kp, Ki, Kd, setpoint):
@@ -23,32 +29,94 @@ time = np.linspace(0, 10, 1000)  # 10 seconds, 1000 points
 dt = time[1] - time[0]
 setpoint = 5.0  # Desired setpoint
 
-# PID parameters
-Kp = 9.94389905e+00
-Ki = 2.26101551e-03
-Kd = 8.85155982e-01
+# Define setpoints at different time intervals
+setpoints = np.piecewise(time, [time < 10, (time >= 10) & (time < 20), time >= 20], [8.0, 10.0, 7.5])
 
-# Initialize PID controller
-pid = PIDController(Kp, Ki, Kd, setpoint)
+# Initialize PID controller with dummy values
+pid = PIDController(1.0, 0.1, 0.05, setpoint)
 
 # Process variables
 process_variable = 0.0
 process_values = []
 setpoints = []
 
-# Simulation loop
+# ANN for PID tuning with 4 hidden layers, using MSE as the loss function and Adam optimizer
+ann = MLPRegressor(hidden_layer_sizes=(10, 10, 10, 10), max_iter=1000, solver='adam', alpha=0.0001)
+
+# PSO for PID tuning
+def objective(params):
+    Kp, Ki, Kd = params
+    pid = PIDController(Kp, Ki, Kd, setpoint)
+    process_variable = 0.0
+    total_error = 0.0
+    for t in time:
+        control_signal = pid.update(process_variable, dt)
+        process_variable += control_signal * dt
+        total_error += abs(setpoint - process_variable)
+        if t > 1.5 and abs(setpoint - process_variable) > 0.05 * setpoint:
+            total_error += 1000  # Penalize if not settled within 1.5 seconds
+    return total_error
+
+# Initial guess and bounds for PSO
+initial_guess = [1.0, 0.1, 0.05]
+bounds = ([0, 0, 0], [10, 1, 1])
+
+# Optimize PID parameters using PSO
+optimal_params, _ = pso(objective, bounds[0], bounds[1], swarmsize=50, maxiter=100)
+Kp_opt, Ki_opt, Kd_opt = optimal_params
+
+# GA parameters
+varbound = np.array([[0, 10], [0, 1], [0, 1]])
+algorithm_param = {'max_num_iteration': 100, 'population_size': 50, 'mutation_probability': 0.1, 'elit_ratio': 0.01, 'crossover_probability': 0.5, 'parents_portion': 0.3, 'crossover_type': 'uniform', 'max_iteration_without_improv': None}
+
+model = ga(function=objective, dimension=3, variable_type='real', variable_boundaries=varbound, algorithm_parameters=algorithm_param)
+model.run()
+
+# Get optimized parameters
+Kp_opt, Ki_opt, Kd_opt = model.output_dict['variable']
+
+# Initialize process variable and lists
+process_variable = 0.0
+process_values = []
+setpoints = []
+
+# Update PID controller with optimized parameters
+pid = PIDController(Kp_opt, Ki_opt, Kd_opt, setpoint)
+
+# Simulation loop with optimized PID
 for t in time:
     control_signal = pid.update(process_variable, dt)
-    process_variable += control_signal * dt  # Simple process model
+    process_variable += control_signal * dt
     process_values.append(process_variable)
     setpoints.append(setpoint)
 
-# Plotting the results
+# Print final values
+print(f"Optimized PID parameters: Kp={Kp_opt}, Ki={Ki_opt}, Kd={Kd_opt}")
+print(f"Final setpoint: {setpoint}")
+print(f"Final process value: {process_values[-1]}")
+# Calculate settling time
+tolerance = 0.05 * setpoint  # 5% tolerance
+settling_time = None
+
+for i in range(len(time)):
+    if abs(process_values[i] - setpoint) <= tolerance:
+        if all(abs(process_values[j] - setpoint) <= tolerance for j in range(i, len(time))):
+            settling_time = time[i]
+            break
+
+if settling_time is not None:
+    print(f"Settling time: {settling_time:.2f} seconds")
+else:
+    print("The process variable did not settle within the specified tolerance.")
+
 plt.figure(figsize=(10, 5))
 plt.plot(time, process_values, label='Process Value')
 plt.plot(time, setpoints, label='Setpoint', linestyle='--')
-plt.xlabel('Time (min)')
-plt.ylabel('Pressure Value')
+plt.axhline(setpoint + tolerance, color='r', linestyle='--', label='Upper Tolerance')
+plt.axhline(setpoint - tolerance, color='r', linestyle='--', label='Lower Tolerance')
+plt.xlabel('Time (s)')
+plt.ylabel('Value')
+plt.title('Process Variable and Setpoint')
 plt.legend()
 plt.grid(True)
 plt.show()
